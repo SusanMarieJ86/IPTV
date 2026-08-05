@@ -23,6 +23,9 @@ import re
 from typing import List, Tuple, Set, Dict
 import logging
 import sys
+# 异步方案要用
+# import asyncio
+# import aiohttp
 
 # 获取文件路径
 def get_file_paths():
@@ -58,8 +61,8 @@ class Config:
     TIMEOUT_CHECK = 2.5
     TIMEOUT_CONNECT = 1.5
     TIMEOUT_READ = 1.5
-    
-    MAX_WORKERS = 30
+    # 30->50激进点
+    MAX_WORKERS = 50  
 
 class StreamChecker:
     def __init__(self, manual_urls=None):
@@ -339,6 +342,100 @@ class StreamChecker:
         logger.info(f"完成 | 有效 {v} | 新增失败 {len(bad)}")
         return ok, bad
 
+    async def batch_check_async(self, to_check, url2line, concurrency=1000):
+        ok, bad = [], []
+        total = len(to_check)
+    
+        logger.info(f"开始异步检测 {total} 个 | 并发数: {concurrency}")
+    
+        # 创建任务队列
+        queue = asyncio.Queue()
+        for item in to_check:
+            queue.put_nowait(item)
+    
+        done_count = 0
+        valid_count = 0
+    
+        async def worker(session):
+            nonlocal done_count, valid_count
+    
+            while True:
+                try:
+                    u, l = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+    
+                wl = u in self.whitelist_urls
+    
+                try:
+                    valid, t = await self.check_url_async(session, u, wl)
+    
+                    if valid:
+                        ok.append((l, t))
+                        valid_count += 1
+                    else:
+                        if wl:
+                            ok.append((l, 0.00))
+                        else:
+                            bad.append(l)
+                            self.new_failed_urls.add(u)
+    
+                except Exception:
+                    if wl:
+                        ok.append((l, 0.00))
+                    else:
+                        bad.append(l)
+                        self.new_failed_urls.add(u)
+    
+                done_count += 1
+                queue.task_done()
+    
+                # 每 1000 个打印一次进度
+                if done_count % 1000 == 0:
+                    logger.info(
+                        f"进度 {done_count}/{total} | "
+                        f"有效 {valid_count} | "
+                        f"失败 {len(bad)}"
+                    )
+    
+        # 连接池配置
+        connector = aiohttp.TCPConnector(
+            limit=concurrency,
+            limit_per_host=50,      # 单域名最大并发，防止把同一个网站打挂
+            ttl_dns_cache=300,      # DNS 缓存 5 分钟
+            ssl=False,              # 如果不需要严格校验 SSL，可关闭，速度更快
+            force_close=True        # 短连接场景下避免连接堆积
+        )
+    
+        # 全局超时时间，根据你的需求调整
+        timeout = aiohttp.ClientTimeout(total=5)
+    
+        async with aiohttp.ClientSession(
+            connector=connector,
+            timeout=timeout
+        ) as session:
+    
+            # 启动 worker
+            worker_count = min(concurrency, total)
+            workers = [
+                asyncio.create_task(worker(session))
+                for _ in range(worker_count)
+            ]
+    
+            await asyncio.gather(*workers)
+            await queue.join()
+    
+        # 按延迟排序
+        ok.sort(key=lambda x: x[1])
+    
+        logger.info(
+            f"异步检测完成 | 总数 {total} | "
+            f"有效 {valid_count} | "
+            f"新增失败 {len(bad)}"
+        )
+    
+        return ok, bad
+        
     def save_results(self, ok, bad, pre_fail):
         t = datetime.now(timezone.utc)+timedelta(hours=8)
         ver = f"{t.strftime('%Y%m%d %H:%M')},url"
@@ -375,6 +472,8 @@ class StreamChecker:
         all_lines.extend(self.whitelist_lines)
         tc, pf, ul = self.prepare_lines(all_lines)
         s, f = self.batch_check(tc, ul)
+        # 异步版
+        # s, f = asyncio.run(self.batch_check_async(to_check, url2line, concurrency=500))
         self._save_blacklist()
         self.save_results(s,f,pf)
         logger.info(f"总耗时：{(datetime.now()-self.start_time).total_seconds():.1f}s")
