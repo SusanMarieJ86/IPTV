@@ -258,23 +258,53 @@ class StreamChecker:
                 self.whitelist_lines.append(line)
         logger.info(f"白名单: {len(self.whitelist_urls)} 个")
 
-    def prepare_lines(self, lines):
-        to_check, pre_fail, url2line = [], [], {}
-        skip = 0
-        for line in lines:
-            if ',' not in line or '://' not in line: continue
-            n, u = line.split(',',1)
-            u = u.strip().split('#')[0].split('$')[0]
-            full = f"{n},{u}"
-            url2line[u] = full
-            if u in self.blacklist_urls and u not in self.whitelist_urls:
-                pre_fail.append(full)
-                skip +=1
-            else:
-                to_check.append((u, full))
-        logger.info(f"黑名单跳过: {skip} | 待检测: {len(to_check)}")
-        return to_check, pre_fail, url2line
+    # def prepare_lines(self, lines):
+    #     to_check, pre_fail, url2line = [], [], {}
+    #     skip = 0
+    #     for line in lines:
+    #         if ',' not in line or '://' not in line: continue
+    #         n, u = line.split(',',1)
+    #         u = u.strip().split('#')[0].split('$')[0]
+    #         full = f"{n},{u}"
+    #         url2line[u] = full
+    #         if u in self.blacklist_urls and u not in self.whitelist_urls:
+    #             pre_fail.append(full)
+    #             skip +=1
+    #         else:
+    #             to_check.append((u, full))
+    #     logger.info(f"黑名单跳过: {skip} | 待检测: {len(to_check)}")
+    #     return to_check, pre_fail, url2line
 
+
+    def prepare_lines(self, lines):
+    to_check, pre_fail, url2line = [], [], {}
+    seen_urls = set()  # 👈 新增：用于记录已经处理过的 URL，实现去重
+    skip = 0
+    
+    for line in lines:
+        if ',' not in line or '://' not in line: 
+            continue
+            
+        n, u = line.split(',', 1)
+        u = u.strip().split('#')[0].split('$')[0]
+        
+        # 👇 核心去重逻辑：如果这个 URL 已经处理过，直接跳过当前行
+        if u in seen_urls:
+            continue
+        seen_urls.add(u) # 将当前 URL 加入已处理集合
+
+        full = f"{n},{u}"
+        url2line[u] = full
+        
+        if u in self.blacklist_urls and u not in self.whitelist_urls:
+            pre_fail.append(full)
+            skip += 1
+        else:
+            to_check.append((u, full))
+            
+    logger.info(f"黑名单跳过: {skip} | 待检测: {len(to_check)}")
+    return to_check, pre_fail, url2line
+    
     def batch_check(self, to_check, url2line):
         ok, bad = [], []
         total = len(to_check)
